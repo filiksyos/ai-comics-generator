@@ -31,9 +31,17 @@ export interface TextGenerationResponse {
 }
 
 export interface ImageGenerationResponse {
-  data?: Array<{
-    url: string;
-    b64_json?: string;
+  choices?: Array<{
+    message: {
+      role: string;
+      content?: string;
+      images?: Array<{
+        type: string;
+        image_url: {
+          url: string; // Base64 data URL (data:image/png;base64,...)
+        };
+      }>;
+    };
   }>;
   error?: {
     message: string;
@@ -62,6 +70,13 @@ export async function generateText(
   }
 }
 
+// Helper function to calculate aspect ratio from dimensions
+function calculateAspectRatio(width: number, height: number): string {
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+  const divisor = gcd(width, height);
+  return `${width / divisor}:${height / divisor}`;
+}
+
 export async function generateImage(
   prompt: string,
   width: number = 1024,
@@ -69,12 +84,19 @@ export async function generateImage(
 ): Promise<string> {
   try {
     const response = await client.post<ImageGenerationResponse>(
-      '/images/generations',
+      '/chat/completions',
       {
-        model: 'google/gemini-2.5-flash-image',
-        prompt,
-        width,
-        height,
+        model: 'google/gemini-2.5-flash-image-preview',
+        messages: [
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        modalities: ['image', 'text'],
+        image_config: {
+          aspect_ratio: calculateAspectRatio(width, height),
+        },
       }
     );
 
@@ -82,12 +104,24 @@ export async function generateImage(
       throw new Error(response.data.error.message);
     }
 
-    if (!response.data.data || response.data.data.length === 0) {
+    if (
+      !response.data.choices ||
+      !response.data.choices[0]?.message?.images ||
+      response.data.choices[0].message.images.length === 0
+    ) {
       throw new Error('No image generated');
     }
 
-    // Return base64 or URL
-    return response.data.data[0].b64_json || response.data.data[0].url || '';
+    // Extract base64 data from data URL (format: data:image/png;base64,...)
+    const imageUrl = response.data.choices[0].message.images[0].image_url.url;
+    
+    // If it's a data URL, extract just the base64 part
+    if (imageUrl.startsWith('data:image')) {
+      const base64Match = imageUrl.match(/base64,(.+)/);
+      return base64Match ? base64Match[1] : imageUrl;
+    }
+    
+    return imageUrl;
   } catch (error) {
     console.error('Error in generateImage:', error);
     throw error;
@@ -102,15 +136,36 @@ export async function generateImageToImage(
   height: number = 1024
 ): Promise<string> {
   try {
-    // Note: This uses the image generation API with a reference image
+    // Note: This uses the chat completions API with a reference image
     // The prompt should describe the character and scene
+    // Include the reference image in the message content
     const response = await client.post<ImageGenerationResponse>(
-      '/images/generations',
+      '/chat/completions',
       {
-        model: 'google/gemini-2.5-flash-image',
-        prompt: `${prompt}. Keep the character consistent with the provided reference image.`,
-        width,
-        height,
+        model: 'google/gemini-2.5-flash-image-preview',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: `${prompt}. Keep the character consistent with the provided reference image.`,
+              },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: imageBase64.startsWith('data:')
+                    ? imageBase64
+                    : `data:image/png;base64,${imageBase64}`,
+                },
+              },
+            ],
+          },
+        ],
+        modalities: ['image', 'text'],
+        image_config: {
+          aspect_ratio: calculateAspectRatio(width, height),
+        },
       }
     );
 
@@ -118,11 +173,24 @@ export async function generateImageToImage(
       throw new Error(response.data.error.message);
     }
 
-    if (!response.data.data || response.data.data.length === 0) {
+    if (
+      !response.data.choices ||
+      !response.data.choices[0]?.message?.images ||
+      response.data.choices[0].message.images.length === 0
+    ) {
       throw new Error('No image generated');
     }
 
-    return response.data.data[0].b64_json || response.data.data[0].url || '';
+    // Extract base64 data from data URL
+    const imageUrl = response.data.choices[0].message.images[0].image_url.url;
+    
+    // If it's a data URL, extract just the base64 part
+    if (imageUrl.startsWith('data:image')) {
+      const base64Match = imageUrl.match(/base64,(.+)/);
+      return base64Match ? base64Match[1] : imageUrl;
+    }
+    
+    return imageUrl;
   } catch (error) {
     console.error('Error in generateImageToImage:', error);
     throw error;
